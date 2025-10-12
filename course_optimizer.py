@@ -919,7 +919,7 @@ def show_data_analysis_step():
             total_capacity = term_limits_matrix.sum().sum()
             st.metric("Total Stream Capacity", int(total_capacity))
     
- with constraint_tabs[1]:
+   with constraint_tabs[1]:
         st.markdown("**Maximum number of different terms each professor can teach in**")
         st.info("This constraint limits how many terms a professor is ACTIVE in, regardless of how many courses they teach.")
         
@@ -1853,6 +1853,7 @@ def create_excel_template_structured():
         return None
 if __name__ == "__main__":
     main()
+
 
 
 
