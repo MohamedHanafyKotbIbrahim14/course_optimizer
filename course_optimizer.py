@@ -591,6 +591,28 @@ def show_excel_upload_step():
     - T1, T2, T3 columns with stream counts
     """)
     
+    # Download template button - FIXED
+    st.subheader("Download Template")
+    st.markdown("**Click below to download an Excel template with the correct format:**")
+    
+    try:
+        template_data = create_excel_template_structured()
+        if template_data:
+            st.download_button(
+                label="📥 Download Excel Template",
+                data=template_data,
+                file_name="RASTA_OP_template.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+        else:
+            st.warning("⚠️ Could not generate Excel template. Please install openpyxl: `pip install openpyxl`")
+    except Exception as e:
+        st.error(f"Error generating template: {str(e)}")
+    
+    st.markdown("---")
+    
+    # File upload
     uploaded_file = st.file_uploader(
         "Upload your Excel file:",
         type=['xlsx', 'xls'],
@@ -1437,6 +1459,168 @@ def show_results_step():
                 del st.session_state[key]
             st.rerun()
 
-
+def create_excel_template_structured():
+    """Create an Excel template file with the specified structure."""
+    try:
+        import openpyxl
+        from openpyxl import Workbook
+        from openpyxl.utils import get_column_letter
+        from openpyxl.styles import Font, PatternFill, Alignment
+        import io
+        
+        wb = Workbook()
+        
+        # Sheet 1: c_ij (Course Preferences)
+        ws1 = wb.active
+        ws1.title = "c_ij"
+        
+        # Sample data
+        course_names = ["ACTL1", "ACTL2", "ACTL3", "ACTL4", "ACTL5"]
+        course_codes = ["Act1", "Act2", "Act3", "Act4", "Act5"]
+        staff_names = ["Jonathan", "JK", "Patrick", "Andres"]
+        
+        # Header formatting
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        header_font = Font(color="FFFFFF", bold=True)
+        
+        # Add course names to row 1
+        for i, name in enumerate(course_names, start=2):
+            cell = ws1.cell(row=1, column=i, value=name)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+        
+        # Add course codes to row 2
+        for i, code in enumerate(course_codes, start=2):
+            cell = ws1.cell(row=2, column=i, value=code)
+            cell.fill = PatternFill(start_color="B4C7E7", end_color="B4C7E7", fill_type="solid")
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(horizontal="center")
+        
+        # Add staff names to column A
+        for i, staff in enumerate(staff_names, start=3):
+            cell = ws1.cell(row=i, column=1, value=staff)
+            cell.fill = PatternFill(start_color="B4C7E7", end_color="B4C7E7", fill_type="solid")
+            cell.font = Font(bold=True)
+        
+        # Fill with sample preference values (5 = neutral)
+        for staff_idx in range(len(staff_names)):
+            for course_idx in range(len(course_codes)):
+                ws1.cell(row=staff_idx+3, column=course_idx+2, value=5)
+        
+        # Sheet 2: t_jk, L_jk, b_j, max_terms
+        ws2 = wb.create_sheet("t_jk_L_jk_b_j_max_terms")
+        
+        # Headers
+        headers = ["Staff", "T1", "T2", "T3", "T1", "T2", "T3", "Total", "Max Terms"]
+        subheaders = ["", "Term Prefs", "", "", "Max Streams", "", "", "Load", "Active"]
+        
+        for i, header in enumerate(headers, start=1):
+            cell = ws2.cell(row=1, column=i, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+        
+        for i, subheader in enumerate(subheaders, start=1):
+            if subheader:
+                cell = ws2.cell(row=2, column=i, value=subheader)
+                cell.fill = PatternFill(start_color="B4C7E7", end_color="B4C7E7", fill_type="solid")
+                cell.font = Font(italic=True)
+                cell.alignment = Alignment(horizontal="center")
+        
+        # Add staff and sample data
+        for i, staff in enumerate(staff_names, start=3):
+            ws2.cell(row=i, column=1, value=staff).font = Font(bold=True)
+            
+            # Term preferences (columns 2-4) - default 5
+            for j in range(2, 5):
+                ws2.cell(row=i, column=j, value=5)
+            
+            # Max streams per term (columns 5-7) - default 2
+            for j in range(5, 8):
+                ws2.cell(row=i, column=j, value=2)
+            
+            # Total load (column 8) - default 4
+            ws2.cell(row=i, column=8, value=4)
+            
+            # Max active terms (column 9) - default 3
+            ws2.cell(row=i, column=9, value=3)
+        
+        # Sheet 3: O_jk (Course Offerings)
+        ws3 = wb.create_sheet("O_jk")
+        
+        # Headers
+        cell = ws3.cell(row=1, column=1, value="Course")
+        cell.fill = header_fill
+        cell.font = header_font
+        
+        terms = ["T1", "T2", "T3"]
+        for i, term in enumerate(terms, start=2):
+            cell = ws3.cell(row=1, column=i, value=term)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+        
+        # Add courses and sample offerings
+        for i, course in enumerate(course_codes, start=2):
+            ws3.cell(row=i, column=1, value=course).font = Font(bold=True)
+            
+            # Sample: offer some courses in different terms
+            ws3.cell(row=i, column=2, value=1 if i % 2 == 0 else 0)  # T1
+            ws3.cell(row=i, column=3, value=1 if i % 3 == 0 else 0)  # T2
+            ws3.cell(row=i, column=4, value=1)  # T3 - all courses offered
+        
+        # Sheet 4: n_jk (Course Streams)
+        ws4 = wb.create_sheet("n_jk")
+        
+        # Headers
+        cell = ws4.cell(row=1, column=1, value="Course")
+        cell.fill = header_fill
+        cell.font = header_font
+        
+        for i, term in enumerate(terms, start=2):
+            cell = ws4.cell(row=1, column=i, value=term)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+        
+        # Add courses and sample stream counts
+        for i, course in enumerate(course_codes, start=2):
+            ws4.cell(row=i, column=1, value=course).font = Font(bold=True)
+            
+            # Sample stream counts - only where course is offered
+            for j in range(2, 5):  # T1, T2, T3
+                offering = ws3.cell(row=i, column=j).value
+                if offering == 1:
+                    ws4.cell(row=i, column=j, value=1)  # Default 1 stream
+                else:
+                    ws4.cell(row=i, column=j, value=0)  # No streams if not offered
+        
+        # Adjust column widths for all sheets
+        for ws in [ws1, ws2, ws3, ws4]:
+            for column in ws.columns:
+                max_length = 0
+                column = list(column)
+                for cell in column:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(cell.value)
+                    except:
+                        pass
+                adjusted_width = min(max_length + 2, 20)
+                ws.column_dimensions[get_column_letter(column[0].column)].width = adjusted_width
+        
+        # Save to bytes
+        excel_buffer = io.BytesIO()
+        wb.save(excel_buffer)
+        excel_buffer.seek(0)
+        return excel_buffer.getvalue()
+        
+    except ImportError:
+        return None
+    except Exception as e:
+        st.error(f"Error creating template: {str(e)}")
+        return None
 if __name__ == "__main__":
     main()
+
