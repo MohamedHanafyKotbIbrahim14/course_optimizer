@@ -919,7 +919,7 @@ def show_data_analysis_step():
             total_capacity = term_limits_matrix.sum().sum()
             st.metric("Total Stream Capacity", int(total_capacity))
     
-    with constraint_tabs[1]:
+with constraint_tabs[1]:
         st.markdown("**Maximum number of different terms each professor can teach in**")
         st.info("This constraint limits how many terms a professor is ACTIVE in, regardless of how many courses they teach.")
         
@@ -954,30 +954,59 @@ def show_data_analysis_step():
         st.markdown("**Professor Flexibility Matrix**")
         st.markdown("*Shows how many terms each professor can be active in*")
         
-        # Create a matrix showing max_terms as a heatmap
-        max_terms_matrix = pd.DataFrame(index=professors, columns=['Max Terms', 'Flexibility'])
+        # Create a matrix showing max_terms as a heatmap using Plotly
+        max_terms_matrix_data = []
+        flexibility_scores = []
         
         for prof in professors:
             max_t = professor_max_terms.get(prof, 3)
-            max_terms_matrix.loc[prof, 'Max Terms'] = max_t
-            
-            # Calculate flexibility score (percentage of terms available)
             flexibility = (max_t / 3) * 100
-            max_terms_matrix.loc[prof, 'Flexibility'] = flexibility
+            max_terms_matrix_data.append({
+                'Professor': prof,
+                'Max Terms': max_t,
+                'Flexibility': f"{flexibility:.0f}%"
+            })
+            flexibility_scores.append(flexibility)
         
-        # Display as styled dataframe
-        st.dataframe(
-            max_terms_matrix.style.background_gradient(
-                subset=['Flexibility'], 
-                cmap='RdYlGn',
-                vmin=0,
-                vmax=100
-            ).format({
-                'Max Terms': '{:.0f}',
-                'Flexibility': '{:.0f}%'
-            }),
-            use_container_width=True
+        max_terms_df = pd.DataFrame(max_terms_matrix_data)
+        
+        # Create heatmap for flexibility
+        fig_flexibility = go.Figure(data=go.Heatmap(
+            z=[flexibility_scores],
+            x=professors,
+            y=['Flexibility %'],
+            text=[[f"{s:.0f}%" for s in flexibility_scores]],
+            texttemplate='%{text}',
+            textfont={"size": 12},
+            colorscale='RdYlGn',
+            zmin=0,
+            zmax=100,
+            colorbar=dict(title="Flexibility %")
+        ))
+        
+        fig_flexibility.update_layout(
+            title='Professor Term Flexibility (% of terms available)',
+            xaxis=dict(title='Professors', tickangle=45),
+            yaxis=dict(title=''),
+            height=200
         )
+        
+        st.plotly_chart(fig_flexibility, use_container_width=True)
+        
+        # Display as regular dataframe with color indicators
+        st.markdown("**Detailed View:**")
+        
+        # Add color indicators using emojis
+        for idx, row in max_terms_df.iterrows():
+            max_t = row['Max Terms']
+            if max_t == 3:
+                max_terms_df.at[idx, 'Status'] = '🟢 Full Flexibility'
+            elif max_t == 2:
+                max_terms_df.at[idx, 'Status'] = '🟡 Moderate Flexibility'
+            else:
+                max_terms_df.at[idx, 'Status'] = '🔴 Limited Flexibility'
+        
+        st.dataframe(max_terms_df, use_container_width=True, hide_index=True)
         
         # Statistics
         col1, col2, col3 = st.columns(3)
@@ -1824,5 +1853,6 @@ def create_excel_template_structured():
         return None
 if __name__ == "__main__":
     main()
+
 
 
