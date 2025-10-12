@@ -869,22 +869,223 @@ def show_data_analysis_step():
     
     st.plotly_chart(fig2, use_container_width=True)
     
-    st.subheader("Professor Constraints Overview")
+    # NEW SECTION: Professor Term Constraints Visualization
+    st.subheader("Professor Term Constraints Overview")
+    st.markdown("**Visualize workload limits and term availability constraints**")
     
-    constraints_data = []
-    for prof in professors:
-        constraints_data.append({
-            'Professor': prof,
-            'Total Load (b_j)': professor_total_load[prof],
-            'Max Active Terms': professor_max_terms.get(prof, 3),
-            'T1 Limit': professor_term_limits.get((prof, 'T1'), 0),
-            'T2 Limit': professor_term_limits.get((prof, 'T2'), 0),
-            'T3 Limit': professor_term_limits.get((prof, 'T3'), 0)
+    # Create tabs for different constraint views
+    constraint_tabs = st.tabs(["📊 Term Stream Limits (L_jk)", "🎯 Maximum Active Terms", "📈 Combined View"])
+    
+    with constraint_tabs[0]:
+        st.markdown("**Maximum streams each professor can teach per term (L_jk)**")
+        
+        # Create L_jk matrix
+        term_limits_matrix = pd.DataFrame(index=professors, columns=terms, dtype=int)
+        
+        for prof in professors:
+            for term in terms:
+                term_limits_matrix.loc[prof, term] = professor_term_limits.get((prof, term), 0)
+        
+        fig_limits = px.imshow(
+            term_limits_matrix.values,
+            labels=dict(x="Term", y="Professor", color="Max Streams"),
+            x=term_limits_matrix.columns.tolist(),
+            y=term_limits_matrix.index.tolist(),
+            color_continuous_scale="Blues",
+            title="Term Stream Limits (L_jk) - Maximum Streams per Professor per Term",
+            aspect="auto",
+            text_auto=True
+        )
+        
+        fig_limits.update_layout(
+            height=max(600, len(professors) * 25),
+            width=800,
+            font=dict(size=12),
+            xaxis=dict(title="Terms"),
+            yaxis=dict(title="Staff Members")
+        )
+        
+        st.plotly_chart(fig_limits, use_container_width=True)
+        
+        # Statistics
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            avg_limit = term_limits_matrix.mean().mean()
+            st.metric("Average Stream Limit", f"{avg_limit:.1f}")
+        with col2:
+            max_limit = term_limits_matrix.max().max()
+            st.metric("Highest Stream Limit", int(max_limit))
+        with col3:
+            total_capacity = term_limits_matrix.sum().sum()
+            st.metric("Total Stream Capacity", int(total_capacity))
+    
+    with constraint_tabs[1]:
+        st.markdown("**Maximum number of different terms each professor can teach in**")
+        st.info("This constraint limits how many terms a professor is ACTIVE in, regardless of how many courses they teach.")
+        
+        # Create max_terms visualization
+        max_terms_data = pd.DataFrame({
+            'Professor': professors,
+            'Max Active Terms': [professor_max_terms.get(prof, 3) for prof in professors]
         })
+        
+        # Create a bar chart
+        fig_max_terms = px.bar(
+            max_terms_data,
+            x='Professor',
+            y='Max Active Terms',
+            title='Maximum Active Terms per Professor',
+            color='Max Active Terms',
+            color_continuous_scale='Viridis',
+            text='Max Active Terms'
+        )
+        
+        fig_max_terms.update_traces(textposition='outside')
+        fig_max_terms.update_layout(
+            height=500,
+            xaxis=dict(title="Staff Members", tickangle=45),
+            yaxis=dict(title="Maximum Active Terms", dtick=1, range=[0, 3.5]),
+            showlegend=False
+        )
+        
+        st.plotly_chart(fig_max_terms, use_container_width=True)
+        
+        # Create a visual matrix showing which term combinations are possible
+        st.markdown("**Professor Flexibility Matrix**")
+        st.markdown("*Shows how many terms each professor can be active in*")
+        
+        # Create a matrix showing max_terms as a heatmap
+        max_terms_matrix = pd.DataFrame(index=professors, columns=['Max Terms', 'Flexibility'])
+        
+        for prof in professors:
+            max_t = professor_max_terms.get(prof, 3)
+            max_terms_matrix.loc[prof, 'Max Terms'] = max_t
+            
+            # Calculate flexibility score (percentage of terms available)
+            flexibility = (max_t / 3) * 100
+            max_terms_matrix.loc[prof, 'Flexibility'] = flexibility
+        
+        # Display as styled dataframe
+        st.dataframe(
+            max_terms_matrix.style.background_gradient(
+                subset=['Flexibility'], 
+                cmap='RdYlGn',
+                vmin=0,
+                vmax=100
+            ).format({
+                'Max Terms': '{:.0f}',
+                'Flexibility': '{:.0f}%'
+            }),
+            use_container_width=True
+        )
+        
+        # Statistics
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            profs_all_terms = sum([1 for prof in professors if professor_max_terms.get(prof, 3) == 3])
+            st.metric("Can Teach All Terms", f"{profs_all_terms}/{len(professors)}")
+        with col2:
+            profs_two_terms = sum([1 for prof in professors if professor_max_terms.get(prof, 3) == 2])
+            st.metric("Limited to 2 Terms", profs_two_terms)
+        with col3:
+            profs_one_term = sum([1 for prof in professors if professor_max_terms.get(prof, 3) == 1])
+            st.metric("Limited to 1 Term", profs_one_term)
     
-    constraints_df = pd.DataFrame(constraints_data)
-    st.dataframe(constraints_df, hide_index=True, use_container_width=True)
+    with constraint_tabs[2]:
+        st.markdown("**Combined constraint view: Total Load (b_j), Term Limits (L_jk), and Max Active Terms**")
+        
+        # Create comprehensive constraint table
+        combined_data = []
+        for prof in professors:
+            row = {
+                'Professor': prof,
+                'Total Load (b_j)': professor_total_load[prof],
+                'Max Active Terms': professor_max_terms.get(prof, 3),
+                'T1 Limit': professor_term_limits.get((prof, 'T1'), 0),
+                'T2 Limit': professor_term_limits.get((prof, 'T2'), 0),
+                'T3 Limit': professor_term_limits.get((prof, 'T3'), 0),
+                'Total Stream Capacity': sum([professor_term_limits.get((prof, t), 0) for t in terms])
+            }
+            combined_data.append(row)
+        
+        combined_df = pd.DataFrame(combined_data)
+        st.dataframe(combined_df, hide_index=True, use_container_width=True)
+        
+        # Visualization: Stacked view of constraints
+        st.markdown("**Visual Comparison of Professor Capacities**")
+        
+        # Create figure with multiple subplots
+        fig_combined = go.Figure()
+        
+        # Add bars for each constraint type
+        fig_combined.add_trace(go.Bar(
+            name='Total Load (b_j)',
+            x=professors,
+            y=[professor_total_load[prof] for prof in professors],
+            marker_color='lightblue'
+        ))
+        
+        fig_combined.add_trace(go.Bar(
+            name='Max Active Terms',
+            x=professors,
+            y=[professor_max_terms.get(prof, 3) for prof in professors],
+            marker_color='lightgreen'
+        ))
+        
+        fig_combined.add_trace(go.Bar(
+            name='Total Stream Capacity',
+            x=professors,
+            y=[sum([professor_term_limits.get((prof, t), 0) for t in terms]) for prof in professors],
+            marker_color='lightsalmon'
+        ))
+        
+        fig_combined.update_layout(
+            title='Professor Capacity Comparison',
+            xaxis=dict(title='Professors', tickangle=45),
+            yaxis=dict(title='Count'),
+            barmode='group',
+            height=500
+        )
+        
+        st.plotly_chart(fig_combined, use_container_width=True)
+        
+        # Key insights
+        st.markdown("**Key Insights:**")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            total_course_capacity = sum(professor_total_load.values())
+            total_required = sum(course_offerings.values())
+            st.metric("Total Course Capacity", f"{total_course_capacity} (Need: {total_required})")
+            
+            capacity_ratio = (total_course_capacity / total_required * 100) if total_required > 0 else 0
+            if capacity_ratio < 100:
+                st.error(f"⚠️ Insufficient capacity: {capacity_ratio:.1f}%")
+            elif capacity_ratio < 120:
+                st.warning(f"⚠️ Tight capacity: {capacity_ratio:.1f}%")
+            else:
+                st.success(f"✓ Sufficient capacity: {capacity_ratio:.1f}%")
+        
+        with col2:
+            total_stream_capacity = sum([
+                professor_term_limits.get((prof, term), 0) 
+                for prof in professors 
+                for term in terms
+            ])
+            total_streams_required = sum(course_streams.values())
+            st.metric("Total Stream Capacity", f"{total_stream_capacity} (Need: {total_streams_required})")
+            
+            stream_ratio = (total_stream_capacity / total_streams_required * 100) if total_streams_required > 0 else 0
+            if stream_ratio < 100:
+                st.error(f"⚠️ Insufficient stream capacity: {stream_ratio:.1f}%")
+            elif stream_ratio < 120:
+                st.warning(f"⚠️ Tight stream capacity: {stream_ratio:.1f}%")
+            else:
+                st.success(f"✓ Sufficient stream capacity: {stream_ratio:.1f}%")
     
+    st.markdown("---")
+    
+    # Navigation
     col1, col2 = st.columns(2)
     with col1:
         if st.button("← Back to Upload"):
@@ -1623,4 +1824,5 @@ def create_excel_template_structured():
         return None
 if __name__ == "__main__":
     main()
+
 
