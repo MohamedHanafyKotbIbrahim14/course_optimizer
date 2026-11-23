@@ -96,7 +96,7 @@ class CourseCoveringProblem:
         for professor in self.professors:
             for term in self.terms:
                 term_stream_load = pulp.lpSum([
-                    self.course_streams.get((course, term), 0) * self.x_vars[(course, professor, term)]
+                    self.course_streams.get((course, term), 1) * self.x_vars[(course, professor, term)]
                     for course in self.courses
                     if (course, professor, term) in self.x_vars
                 ])
@@ -203,7 +203,9 @@ class CourseCoveringProblem:
                 if self.course_offerings.get((course, term), 0) == 1:
                     assigned = False
                     for professor in self.professors:
-                        if (course, professor, term) in self.x_vars and self.x_vars[(course, professor, term)].varValue == 1:
+                        var = self.x_vars.get((course, professor, term))
+                        # a solver can return 0.9999999 for a binary, so do not test "== 1"
+                        if var is not None and var.varValue is not None and var.varValue > 0.5:
                             assignments[(course, term)] = professor
                             professor_loads[professor]['total_courses'] += 1
                             streams_count = self.course_streams.get((course, term), 1)
@@ -215,15 +217,17 @@ class CourseCoveringProblem:
                     if not assigned:
                         unassigned_offerings.append((course, term))
         
-        # Extract active terms per professor
+        # Active terms = terms in which the professor actually teaches.
+        # y_jk is only forced UP by the linking constraint (x <= M*y), so the solver may
+        # leave y_jk = 1 in a term with no teaching; reading y would overstate activity.
         for professor in self.professors:
-            for term in self.terms:
-                if self.y_vars[(professor, term)].varValue == 1:
-                    professor_loads[professor]['active_terms'].append(term)
+            taught = {term for (course, term), prof in assignments.items() if prof == professor}
+            professor_loads[professor]['active_terms'] = [term for term in self.terms if term in taught]
         
         return {
             'status': 'Optimal',
-            'objective_value': pulp.value(self.model.objective),
+            # PuLP returns None when every objective coefficient is 0 (e.g. all preferences are 0)
+            'objective_value': pulp.value(self.model.objective) or 0.0,
             'assignments': assignments,
             'professor_loads': professor_loads,
             'unassigned_offerings': unassigned_offerings
@@ -263,6 +267,19 @@ class CourseCoveringProblem:
         return violations
 
 
+def _restore_widget(key, saved_value, low=None, high=None):
+    """Give a widget its last saved value when its page is opened again.
+
+    Streamlit forgets a widget's value as soon as the widget is not drawn, so
+    without this every input on a page falls back to its default after "Back".
+    Must be called just before the widget, and the widget must not pass value=/index=.
+    """
+    if key not in st.session_state:
+        if low is not None:
+            saved_value = min(high, max(low, int(saved_value)))
+        st.session_state[key] = saved_value
+
+
 def main():
     st.set_page_config(
         page_title="RASTA-OP",
@@ -287,6 +304,12 @@ def main():
         st.session_state.professors = []
     if 'terms' not in st.session_state:
         st.session_state.terms = ['T1', 'T2', 'T3']
+
+    # The two input methods number their steps differently (4 steps vs 5),
+    # so go back to step 1 whenever the method is switched.
+    if st.session_state.get('input_method') != input_method:
+        st.session_state.input_method = input_method
+        st.session_state.step = 1
     
     if input_method == "Excel Upload":
         if st.session_state.step == 1:
@@ -294,9 +317,10 @@ def main():
         elif st.session_state.step == 2:
             show_data_analysis_step()
         elif st.session_state.step == 3:
-            show_clustering_analysis_step()
+            show_clustering_analysis_step(step_no=3, back_step=2,
+                                          back_label="← Back to Data Analysis", results_step=4)
         elif st.session_state.step == 4:
-            show_results_step()
+            show_results_step(back_step=3)
     else:
         if st.session_state.step == 1:
             show_setup_step()
@@ -305,9 +329,10 @@ def main():
         elif st.session_state.step == 3:
             show_preferences_step()
         elif st.session_state.step == 4:
-            show_clustering_analysis_step()
+            show_clustering_analysis_step(step_no=4, back_step=3,
+                                          back_label="← Back to Preferences", results_step=5)
         elif st.session_state.step == 5:
-            show_results_step()
+            show_results_step(back_step=4)
 
 
 def show_setup_step():
@@ -320,7 +345,7 @@ def show_setup_step():
         st.subheader("Courses")
         courses_input = st.text_area(
             "Enter courses (one per line):",
-            value="ACTL1\nACTL2\nACTL3\nACTL4\nACTL5",
+            value="\n".join(st.session_state.courses) or "ACTL1\nACTL2\nACTL3\nACTL4\nACTL5",
             height=120
         )
     
@@ -328,13 +353,14 @@ def show_setup_step():
         st.subheader("Professors")
         professors_input = st.text_area(
             "Enter professors (one per line):",
-            value="Jonathan\nJK\nPatrick\nAndres",
+            value="\n".join(st.session_state.professors) or "Jonathan\nJK\nPatrick\nAndres",
             height=120
         )
     
     if st.button("Next: Set Constraints", type="primary"):
-        courses = [course.strip() for course in courses_input.split('\n') if course.strip()]
-        professors = [prof.strip() for prof in professors_input.split('\n') if prof.strip()]
+        # dict.fromkeys drops a name typed twice (it would create duplicate widgets and constraints)
+        courses = list(dict.fromkeys(course.strip() for course in courses_input.split('\n') if course.strip()))
+        professors = list(dict.fromkeys(prof.strip() for prof in professors_input.split('\n') if prof.strip()))
         
         if not courses or not professors:
             st.error("Please enter at least one course and one professor.")
@@ -356,22 +382,31 @@ def show_constraints_step():
     st.subheader("Course Offerings & Streams (O_ik, n_ik)")
     st.markdown("Configure which courses are offered in which terms and how many streams each has")
     
+    # what was entered on this page before (so that "Back" does not wipe it)
+    saved_offerings = st.session_state.get('course_offerings', {})
+    saved_streams = st.session_state.get('course_streams', {})
+    saved_total_load = st.session_state.get('professor_total_load', {})
+    saved_term_limits = st.session_state.get('professor_term_limits', {})
+    saved_max_terms = st.session_state.get('professor_max_terms', {})
+
     course_offerings = {}
     course_streams = {}
-    
+
     for course in courses:
         st.write(f"**{course}**")
         cols = st.columns(len(terms))
         
         for idx, term in enumerate(terms):
             with cols[idx]:
+                _restore_widget(f"offer_{course}_{term}", saved_offerings.get((course, term), 0) == 1)
                 offered = st.checkbox(f"Offer in {term}", key=f"offer_{course}_{term}")
                 course_offerings[(course, term)] = 1 if offered else 0
                 
                 if offered:
+                    _restore_widget(f"streams_{course}_{term}", saved_streams.get((course, term), 1), 1, 5)
                     streams = st.number_input(
                         f"Streams in {term}:",
-                        min_value=1, max_value=5, value=1,
+                        min_value=1, max_value=5,
                         key=f"streams_{course}_{term}"
                     )
                     course_streams[(course, term)] = streams
@@ -388,9 +423,10 @@ def show_constraints_step():
         professor_total_load = {}
         
         for professor in professors:
+            _restore_widget(f"total_load_{professor}", saved_total_load.get(professor, 4), 1, 10)
             load = st.number_input(
                 f"{professor} - Total courses (b_j):",
-                min_value=1, max_value=10, value=4,
+                min_value=1, max_value=10,
                 key=f"total_load_{professor}"
             )
             professor_total_load[professor] = load
@@ -406,9 +442,10 @@ def show_constraints_step():
             
             for idx, term in enumerate(terms):
                 with sub_cols[idx]:
+                    _restore_widget(f"term_limit_{professor}_{term}", saved_term_limits.get((professor, term), 2), 0, 6)
                     limit = st.number_input(
                         f"{term}:",
-                        min_value=0, max_value=6, value=2,
+                        min_value=0, max_value=6,
                         key=f"term_limit_{professor}_{term}",
                         help=f"Max streams {professor} can teach in {term}"
                     )
@@ -423,10 +460,10 @@ def show_constraints_step():
     cols = st.columns(min(4, len(professors)))
     for idx, professor in enumerate(professors):
         with cols[idx % len(cols)]:
+            _restore_widget(f"max_terms_{professor}", saved_max_terms.get(professor, 3), 1, 3)  # default: all 3 terms
             max_terms = st.selectbox(
                 f"{professor}:",
                 options=[1, 2, 3],
-                index=2,  # Default: can teach in all 3 terms
                 key=f"max_terms_{professor}",
                 help=f"Maximum number of different terms {professor} can teach in"
             )
@@ -493,17 +530,22 @@ def show_preferences_step():
     st.subheader("Course Preferences (c_ij)")
     st.markdown("**Scale: 0 = Cannot teach, 5 = Neutral, 10 = Strongly prefer**")
     
+    # what was entered on this page before (so that "Back" does not reset everything to 5)
+    saved_course_prefs = st.session_state.get('course_preferences', {})
+    saved_term_prefs = st.session_state.get('term_preferences', {})
+
     course_preferences = {}
-    
+
     for professor in professors:
         st.write(f"**{professor}'s Course Preferences:**")
         cols = st.columns(min(4, len(courses)))
         
         for idx, course in enumerate(courses):
             with cols[idx % len(cols)]:
+                _restore_widget(f"course_pref_{course}_{professor}", saved_course_prefs.get((course, professor), 5), 0, 10)
                 pref = st.slider(
                     f"{course}",
-                    min_value=0, max_value=10, value=5,
+                    min_value=0, max_value=10,
                     key=f"course_pref_{course}_{professor}"
                 )
                 course_preferences[(course, professor)] = pref
@@ -519,9 +561,10 @@ def show_preferences_step():
         
         for idx, term in enumerate(terms):
             with cols[idx]:
+                _restore_widget(f"term_pref_{professor}_{term}", saved_term_prefs.get((professor, term), 5), 0, 10)
                 pref = st.slider(
                     f"{term}",
-                    min_value=0, max_value=10, value=5,
+                    min_value=0, max_value=10,
                     key=f"term_pref_{professor}_{term}"
                 )
                 term_preferences[(professor, term)] = pref
@@ -603,7 +646,7 @@ def show_excel_upload_step():
                 data=template_data,
                 file_name="RASTA_OP_template.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
+                width="stretch"
             )
         else:
             st.warning("⚠️ Could not generate Excel template. Please install openpyxl: `pip install openpyxl`")
@@ -658,31 +701,36 @@ def show_excel_upload_step():
                 
                 st.subheader("Processing Course Preferences (c_ij)")
                 
-                course_names = []
-                course_codes = []
+                # Remember WHICH column / row each course and staff member is in, so that a
+                # blank column or row cannot shift preferences onto the wrong name.
+                # A repeated name is read once (first occurrence) and reported below.
+                duplicate_names = []
+
+                course_cols = {}
                 for col_idx in range(1, len(sheet1.columns)):
-                    if pd.notna(sheet1.iloc[0, col_idx]):
-                        course_names.append(str(sheet1.iloc[0, col_idx]).strip())
                     if pd.notna(sheet1.iloc[1, col_idx]):
-                        course_codes.append(str(sheet1.iloc[1, col_idx]).strip())
-                
-                staff_names = []
+                        code = str(sheet1.iloc[1, col_idx]).strip()
+                        if code in course_cols:
+                            duplicate_names.append(code)
+                        else:
+                            course_cols[code] = col_idx
+                course_codes = list(course_cols)
+
+                staff_rows = {}
                 for row_idx in range(2, len(sheet1)):
                     if pd.notna(sheet1.iloc[row_idx, 0]):
-                        staff_names.append(str(sheet1.iloc[row_idx, 0]).strip())
-                
+                        name = str(sheet1.iloc[row_idx, 0]).strip()
+                        if name in staff_rows:
+                            duplicate_names.append(name)
+                        else:
+                            staff_rows[name] = row_idx
+                staff_names = list(staff_rows)
+
                 course_preferences = {}
-                for staff_idx, staff in enumerate(staff_names):
-                    for course_idx, course in enumerate(course_codes):
-                        if course_idx < len(course_codes):
-                            row_idx = staff_idx + 2
-                            col_idx = course_idx + 1
-                            if row_idx < len(sheet1) and col_idx < len(sheet1.columns):
-                                pref_val = sheet1.iloc[row_idx, col_idx]
-                                if pd.notna(pref_val):
-                                    course_preferences[(course, staff)] = float(pref_val)
-                                else:
-                                    course_preferences[(course, staff)] = 0.0
+                for staff, row_idx in staff_rows.items():
+                    for course, col_idx in course_cols.items():
+                        pref_val = sheet1.iloc[row_idx, col_idx]
+                        course_preferences[(course, staff)] = float(pref_val) if pd.notna(pref_val) else 0.0
                 
                 st.success(f"Found {len(staff_names)} staff and {len(course_codes)} courses")
                 
@@ -738,6 +786,53 @@ def show_excel_upload_step():
                             else:
                                 course_streams[(course, term)] = 0
                 
+                # ---- do the four sheets agree with each other? ----
+                data_warnings = []
+                if duplicate_names:
+                    data_warnings.append("Repeated in sheet c_ij (first occurrence used): "
+                                         + ", ".join(duplicate_names))
+
+                # staff with preferences but no row in the constraints sheet: same defaults as blank cells
+                missing_staff = [s for s in staff_names if s not in professor_total_load]
+                for staff in missing_staff:
+                    for term in terms:
+                        term_preferences[(staff, term)] = 5.0
+                        professor_term_limits[(staff, term)] = 2
+                    professor_total_load[staff] = 4
+                    professor_max_terms[staff] = 3
+                if missing_staff:
+                    data_warnings.append("In c_ij but not in the constraints sheet - defaults used "
+                                         "(term preference 5, 2 streams per term, load 4, 3 terms): "
+                                         + ", ".join(missing_staff))
+                extra_staff = [s for s in professor_total_load if s not in staff_rows]
+                if extra_staff:
+                    data_warnings.append("In the constraints sheet but not in c_ij - ignored: "
+                                         + ", ".join(extra_staff))
+
+                listed_courses = {course for (course, term) in course_offerings}
+                not_listed = [c for c in course_codes if c not in listed_courses]
+                if not_listed:
+                    data_warnings.append("In c_ij but not in O_jk - treated as not offered: "
+                                         + ", ".join(not_listed))
+                unknown_courses = sorted(listed_courses - set(course_codes))
+                if unknown_courses:
+                    data_warnings.append("In O_jk but with no column in c_ij - ignored: "
+                                         + ", ".join(unknown_courses))
+
+                # an offered course needs at least 1 stream, otherwise it uses no capacity in L_jk
+                no_streams = []
+                for course in course_codes:
+                    for term in terms:
+                        if course_offerings.get((course, term), 0) == 1 and course_streams.get((course, term), 0) < 1:
+                            course_streams[(course, term)] = 1
+                            no_streams.append(f"{course} ({term})")
+                if no_streams:
+                    data_warnings.append("Offered in O_jk but 0 or missing in n_jk - counted as 1 stream: "
+                                         + ", ".join(no_streams))
+
+                for message in data_warnings:
+                    st.warning(message)
+
                 st.session_state.courses = course_codes
                 st.session_state.professors = staff_names
                 st.session_state.terms = terms
@@ -824,7 +919,7 @@ def show_data_analysis_step():
         )
     )
     
-    st.plotly_chart(fig1, use_container_width=True)
+    st.plotly_chart(fig1, width="stretch")
     
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -867,7 +962,7 @@ def show_data_analysis_step():
         yaxis=dict(title="Staff Members")
     )
     
-    st.plotly_chart(fig2, use_container_width=True)
+    st.plotly_chart(fig2, width="stretch")
     
     # NEW SECTION: Professor Term Constraints Visualization
     st.subheader("Professor Term Constraints Overview")
@@ -905,7 +1000,7 @@ def show_data_analysis_step():
             yaxis=dict(title="Staff Members")
         )
         
-        st.plotly_chart(fig_limits, use_container_width=True)
+        st.plotly_chart(fig_limits, width="stretch")
         
         # Statistics
         col1, col2, col3 = st.columns(3)
@@ -948,7 +1043,7 @@ def show_data_analysis_step():
             showlegend=False
         )
         
-        st.plotly_chart(fig_max_terms, use_container_width=True)
+        st.plotly_chart(fig_max_terms, width="stretch")
         
         # Create a visual matrix showing which term combinations are possible
         st.markdown("**Professor Flexibility Matrix**")
@@ -991,7 +1086,7 @@ def show_data_analysis_step():
             height=200
         )
         
-        st.plotly_chart(fig_flexibility, use_container_width=True)
+        st.plotly_chart(fig_flexibility, width="stretch")
         
         # Display as regular dataframe with color indicators
         st.markdown("**Detailed View:**")
@@ -1006,7 +1101,7 @@ def show_data_analysis_step():
             else:
                 max_terms_df.at[idx, 'Status'] = '🔴 Limited Flexibility'
         
-        st.dataframe(max_terms_df, use_container_width=True, hide_index=True)
+        st.dataframe(max_terms_df, width="stretch", hide_index=True)
         
         # Statistics
         col1, col2, col3 = st.columns(3)
@@ -1038,7 +1133,7 @@ def show_data_analysis_step():
             combined_data.append(row)
         
         combined_df = pd.DataFrame(combined_data)
-        st.dataframe(combined_df, hide_index=True, use_container_width=True)
+        st.dataframe(combined_df, hide_index=True, width="stretch")
         
         # Visualization: Stacked view of constraints
         st.markdown("**Visual Comparison of Professor Capacities**")
@@ -1076,7 +1171,7 @@ def show_data_analysis_step():
             height=500
         )
         
-        st.plotly_chart(fig_combined, use_container_width=True)
+        st.plotly_chart(fig_combined, width="stretch")
         
         # Key insights
         st.markdown("**Key Insights:**")
@@ -1127,9 +1222,9 @@ def show_data_analysis_step():
             st.rerun()
 
 
-def show_clustering_analysis_step():
-    """Show clustering analysis page."""
-    st.header("Step 3: Clustering Analysis")
+def show_clustering_analysis_step(step_no=3, back_step=2, back_label="← Back to Data Analysis", results_step=4):
+    """Show clustering analysis page (step 3 of the Excel flow, step 4 of the manual flow)."""
+    st.header(f"Step {step_no}: Clustering Analysis")
     
     courses = st.session_state.courses
     professors = st.session_state.professors
@@ -1158,15 +1253,25 @@ def show_clustering_analysis_step():
         
         st.subheader("PCA & K-Means Clustering Visualization")
         
-        n_clusters = st.selectbox(
-            "Select number of clusters (K):",
-            options=[2, 3, 4, 5],
-            index=1,
-            help="Choose how many clusters to identify in the data"
-        )
+        # K-Means needs K <= number of items being clustered, and a 2-D PCA needs
+        # at least 2 courses and 2 professors; otherwise scikit-learn raises an error.
+        by_course = clustering_type == "Course Clustering (Which courses are similar?)"
+        n_items = len(courses) if by_course else len(professors)
+        k_options = [k for k in [2, 3, 4, 5] if k <= n_items]
+        can_cluster = bool(k_options) and min(len(courses), len(professors)) >= 2
+
+        if can_cluster:
+            n_clusters = st.selectbox(
+                "Select number of clusters (K):",
+                options=k_options,
+                index=min(1, len(k_options) - 1),
+                help="Choose how many clusters to identify in the data"
+            )
+        else:
+            st.info("PCA / K-Means needs at least 2 courses and 2 professors, so it is skipped here.")
         
         if clustering_type == "Course Clustering (Which courses are similar?)":
-            if len(courses) >= 2:
+            if can_cluster:
                 data_for_pca = course_pref_matrix.values
                 scaler = StandardScaler()
                 data_scaled = scaler.fit_transform(data_for_pca)
@@ -1191,7 +1296,7 @@ def show_clustering_analysis_step():
                 )
                 fig_pca.update_traces(textposition='top center', marker=dict(size=12))
                 fig_pca.update_layout(height=700, showlegend=True)
-                st.plotly_chart(fig_pca, use_container_width=True)
+                st.plotly_chart(fig_pca, width="stretch")
                 
                 st.markdown("**Cluster Membership:**")
                 cluster_summary = []
@@ -1202,10 +1307,10 @@ def show_clustering_analysis_step():
                         'Size': len(cluster_courses),
                         'Courses': ', '.join(cluster_courses)
                     })
-                st.dataframe(pd.DataFrame(cluster_summary), hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame(cluster_summary), hide_index=True, width="stretch")
         
         else:
-            if len(professors) >= 2:
+            if can_cluster:
                 data_for_pca = course_pref_matrix.T.values
                 scaler = StandardScaler()
                 data_scaled = scaler.fit_transform(data_for_pca)
@@ -1230,7 +1335,7 @@ def show_clustering_analysis_step():
                 )
                 fig_pca.update_traces(textposition='top center', marker=dict(size=12))
                 fig_pca.update_layout(height=700, showlegend=True)
-                st.plotly_chart(fig_pca, use_container_width=True)
+                st.plotly_chart(fig_pca, width="stretch")
                 
                 st.markdown("**Cluster Membership:**")
                 cluster_summary = []
@@ -1241,7 +1346,7 @@ def show_clustering_analysis_step():
                         'Size': len(cluster_profs),
                         'Professors': ', '.join(cluster_profs)
                     })
-                st.dataframe(pd.DataFrame(cluster_summary), hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame(cluster_summary), hide_index=True, width="stretch")
         
         st.markdown("---")
         
@@ -1274,7 +1379,7 @@ def show_clustering_analysis_step():
                 yaxis=dict(title="Distance"),
                 height=600
             )
-            st.plotly_chart(fig_dendro, use_container_width=True)
+            st.plotly_chart(fig_dendro, width="stretch")
     
     else:
         if len(professors) >= 2:
@@ -1300,7 +1405,7 @@ def show_clustering_analysis_step():
                 yaxis=dict(title="Distance"),
                 height=600
             )
-            st.plotly_chart(fig_dendro, use_container_width=True)
+            st.plotly_chart(fig_dendro, width="stretch")
     
     st.markdown("---")
     
@@ -1312,14 +1417,20 @@ def show_clustering_analysis_step():
         st.subheader("Cluster Relationship Analysis")
         st.markdown("**Analyze relationships between professor clusters and course clusters**")
         
-        n_clusters_analysis = st.selectbox(
-            "Select number of clusters for relationship analysis:",
-            options=[2, 3, 4, 5],
-            index=1,
-            key="cluster_relationship_select"
-        )
-        
-        if len(courses) >= 2 and len(professors) >= 2:
+        # the same K is used for courses and for professors, so it cannot exceed either count
+        k_options_rel = [k for k in [2, 3, 4, 5] if k <= min(len(courses), len(professors))]
+
+        if k_options_rel:
+            n_clusters_analysis = st.selectbox(
+                "Select number of clusters for relationship analysis:",
+                options=k_options_rel,
+                index=min(1, len(k_options_rel) - 1),
+                key="cluster_relationship_select"
+            )
+        else:
+            st.info("Relationship analysis needs at least 2 courses and 2 professors, so it is skipped here.")
+
+        if k_options_rel:
             scaler_courses = StandardScaler()
             course_data_scaled = scaler_courses.fit_transform(course_pref_matrix.values)
             kmeans_courses = KMeans(n_clusters=n_clusters_analysis, random_state=42, n_init=10)
@@ -1351,7 +1462,7 @@ def show_clustering_analysis_step():
                 fig_courses = px.scatter(pca_courses_df, x='PC1', y='PC2', color='Cluster', text='Course',
                                         title=f'Courses - {n_clusters_analysis} Clusters')
                 fig_courses.update_layout(height=500)
-                st.plotly_chart(fig_courses, use_container_width=True)
+                st.plotly_chart(fig_courses, width="stretch")
             
             with col2:
                 pca_profs = PCA(n_components=2)
@@ -1367,7 +1478,7 @@ def show_clustering_analysis_step():
                 fig_profs = px.scatter(pca_profs_df, x='PC1', y='PC2', color='Cluster', text='Professor',
                                       title=f'Professors - {n_clusters_analysis} Clusters')
                 fig_profs.update_layout(height=500)
-                st.plotly_chart(fig_profs, use_container_width=True)
+                st.plotly_chart(fig_profs, width="stretch")
             
             st.markdown("### Cross-Cluster Affinity Matrix")
             
@@ -1397,7 +1508,7 @@ def show_clustering_analysis_step():
             )
             
             fig_affinity.update_layout(height=400)
-            st.plotly_chart(fig_affinity, use_container_width=True)
+            st.plotly_chart(fig_affinity, width="stretch")
             
             st.markdown("### Professor ↔ Course Cluster Connections (Sankey)")
             st.markdown("**Flow diagram showing relationships between professor and course clusters**")
@@ -1474,7 +1585,7 @@ def show_clustering_analysis_step():
                     paper_bgcolor='white'
                 )
                 
-                st.plotly_chart(fig_sankey, use_container_width=True)
+                st.plotly_chart(fig_sankey, width="stretch")
                 
                 st.success(f"✓ Showing {len(source_nodes)} connections. Flow thickness = preference strength. Green=High (≥8), Yellow=Medium (≥6.5), Orange=Moderate")
             else:
@@ -1491,35 +1602,36 @@ def show_clustering_analysis_step():
                         relationships.append({
                             'Professor Cluster': f'P{p_cluster+1}',
                             'Course Cluster': f'C{c_cluster+1}',
-                            'Avg Preference': f'{avg_pref:.2f}',
+                            'Avg Preference': round(float(avg_pref), 2),
                             'Professors': ', '.join(prof_members),
                             'Courses': ', '.join(course_members)
                         })
             
-            relationships_df = pd.DataFrame(relationships)
-            relationships_df = relationships_df.sort_values('Avg Preference', ascending=False)
-            st.dataframe(relationships_df, hide_index=True, use_container_width=True)
+            if relationships:
+                relationships_df = pd.DataFrame(relationships)
+                relationships_df = relationships_df.sort_values('Avg Preference', ascending=False)
+                st.dataframe(relationships_df, hide_index=True, width="stretch",
+                             column_config={'Avg Preference': st.column_config.NumberColumn(format="%.2f")})
+            else:
+                st.info("No cluster pair has an average preference above 0.")
         
     except ImportError:
         st.info("Install scikit-learn for full clustering features: `pip install scikit-learn`")
     
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("← Back to Data Analysis"):
-            st.session_state.step = 2
+        if st.button(back_label):
+            st.session_state.step = back_step
             st.rerun()
-    
+
     with col2:
         if st.button("Run Optimization →", type="primary"):
-            if 'course_offerings' in st.session_state:
-                st.session_state.step = 4
-            else:
-                st.session_state.step = 5
+            st.session_state.step = results_step
             st.rerun()
 
 
-def show_results_step():
-    """Show optimization results."""
+def show_results_step(back_step=3):
+    """Show optimization results (step 4 of the Excel flow, step 5 of the manual flow)."""
     st.header("Optimization Results")
     
     courses = st.session_state.courses
@@ -1558,7 +1670,7 @@ def show_results_step():
     with col1:
         st.metric("Status", solution['status'])
     with col2:
-        if solution['objective_value']:
+        if solution['objective_value'] is not None:
             st.metric("Objective Value", f"{solution['objective_value']:.1f}")
     with col3:
         st.metric("Unassigned", len(solution.get('unassigned_offerings', [])))
@@ -1599,7 +1711,7 @@ def show_results_step():
                     active_professors = (term_matrix.sum(axis=0) > 0).sum()
                     st.metric(f"Active Professors in {term}", active_professors)
                 with col3:
-                    total_streams_term = sum([course_streams.get((course, term), 0) 
+                    total_streams_term = sum([course_streams.get((course, term), 1)
                                             for course in courses 
                                             if (course, term) in solution['assignments']])
                     st.metric(f"Total Streams in {term}", total_streams_term)
@@ -1680,7 +1792,7 @@ def show_results_step():
     col1, col2 = st.columns(2)
     with col1:
         if st.button("← Back to Clustering"):
-            st.session_state.step = 3
+            st.session_state.step = back_step
             st.rerun()
     
     with col2:
@@ -1853,8 +1965,3 @@ def create_excel_template_structured():
         return None
 if __name__ == "__main__":
     main()
-
-
-
-
-
