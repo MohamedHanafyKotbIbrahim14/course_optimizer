@@ -1,12 +1,16 @@
-streamlit
-plotly
-pandas
-pulp
-numpy
-xlsxwriter
-openpyxl
-scipy
-scikit-learn
-networkx
-
+# Pinned to the versions the app was tested with (Python 3.12 or newer).
+streamlit==1.67.0
+plotly==7.1.0
+pandas==3.0.5
+# PuLP 4 is a rewrite: LpVariable(..., cat=...), PULP_CBC_CMD and LpStatus are gone and
+# no solver is bundled. 3.3.2 is the last release this code runs on, and it ships CBC.
+pulp==3.3.2
+numpy==2.5.3
+xlsxwriter==3.2.9
+openpyxl==3.1.5
+scipy==1.18.1
+scikit-learn==1.9.1
+networkx==3.7
+# needed by pandas to read .xls uploads (the uploader accepts xlsx and xls)
+xlrd==2.0.2
 
